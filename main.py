@@ -1,46 +1,66 @@
 # main.py
-import os
 import time
+import threading
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, messagebox
+
 from playwright.sync_api import sync_playwright
+
 import config
 import logic
 
 
-def run_auto_manage(page, target_config):
-    """模式1：整页批处理模式 (动态匹配池极速版)"""
-    with open(target_config["keyword_file"], 'r', encoding='utf-8') as f:
+def run_auto_manage(page, target_config, log):
+    """模式1：商品リストに基づく自動管理モード"""
+
+    keyword_file = Path(target_config["keyword_file"])
+
+    if not keyword_file.exists():
+        log(f"❌ キーワードファイルが見つかりません：{keyword_file}")
+        log("以下の txt ファイルがプログラムに同梱されているか確認してください。")
+        log("  - 宫古岛商品名称库.txt")
+        log("  - 西表岛商品名称库.txt")
+        log("  - 石垣岛商品名称库.txt")
+        return
+
+    with open(keyword_file, "r", encoding="utf-8") as f:
         keywords = [line.strip() for line in f if line.strip()]
 
     if not keywords:
-        print("❌ 关键词库为空！")
+        log("❌ キーワードリストが空です。")
         return
 
     target_limit = 5
     keyword_counts = {kw: 0 for kw in keywords}
     active_keywords = keywords.copy()
 
-    print(f"\n" + "=" * 50)
-    print(f"▶️ 开启【自动管理模式】(动态匹配池)")
-    print(f"   (共 {len(keywords)} 个关键词，每个上限 {target_limit} 条)")
-    print(f"==================================================")
+    log("")
+    log("=" * 50)
+    log("▶️ 自動管理モードを開始します")
+    log(f"   商品数：{len(keywords)} 件 / 各商品最大 {target_limit} 件まで")
+    log("=" * 50)
 
     page_num = config.START_PAGE
 
     while page_num <= config.MAX_PAGE:
         if not active_keywords:
-            print(f"\n🎯 完美！匹配池已清空，所有目标均已达成！提前结束。")
+            log("")
+            log("🎯 すべての商品が上限に達しました。処理を終了します。")
             break
 
-        print(f"  🔍 正在扫描第 {page_num} 页... (匹配池剩余: {len(active_keywords)}个词)")
+        log(f"🔍 {page_num} ページ目を確認中...（残り商品数：{len(active_keywords)}）")
+
         try:
             page.goto(f"https://ptn.activityjapan.com/review?page={page_num}", timeout=60000)
-        except:
-            print("   ⚠️ 页面加载超时，尝试强行读取...")
+        except Exception:
+            log("⚠️ ページの読み込みに時間がかかっています。続行します。")
 
         rows = page.locator("tr.date-url-target")
         count = rows.count()
+
         if count == 0:
-            print("   🏁 似乎已翻到最后一页，无更多数据。")
+            log("🏁 データが見つかりません。最終ページの可能性があります。")
             break
 
         page_needs_save = False
@@ -50,14 +70,16 @@ def run_auto_manage(page, target_config):
                 break
 
             row = rows.nth(i)
+
             try:
                 data = logic.parse_review_data(row)
-            except:
+            except Exception:
                 continue
 
             matched_kw = None
+
             for kw in active_keywords:
-                if logic.normalize_text(kw) in data['plan_name_clean']:
+                if logic.normalize_text(kw) in data["plan_name_clean"]:
                     matched_kw = kw
                     break
 
@@ -65,13 +87,13 @@ def run_auto_manage(page, target_config):
                 action_taken = False
 
                 if logic.is_qualified_for_pickup(data, config.MIN_RATING, config.MIN_LENGTH):
-                    print(f"      ⚡ [置顶] 命中: '{matched_kw}' -> {data['title'][:15]}...")
-                    logic.perform_check_action(data['checkbox'])
+                    log(f"⚡ [ピックアップ追加] {matched_kw} -> {data['title'][:15]}...")
+                    logic.perform_check_action(data["checkbox"])
                     action_taken = True
 
                 elif logic.should_cancel_pickup(data, config.MIN_RATING, config.MIN_LENGTH):
-                    print(f"      🗑️ [取消] 命中: '{matched_kw}' -> {data['title'][:15]}...")
-                    logic.perform_uncheck_action(data['checkbox'])
+                    log(f"🗑️ [ピックアップ解除] {matched_kw} -> {data['title'][:15]}...")
+                    logic.perform_uncheck_action(data["checkbox"])
                     action_taken = True
 
                 if action_taken:
@@ -79,49 +101,56 @@ def run_auto_manage(page, target_config):
                     page_needs_save = True
 
                     if keyword_counts[matched_kw] >= target_limit:
-                        print(f"      🎯 关键词 '{matched_kw}' 已满 {target_limit} 条，移出匹配池！")
+                        log(f"🎯 {matched_kw} は {target_limit} 件に達しました。対象リストから外します。")
                         active_keywords.remove(matched_kw)
 
         if page_needs_save:
-            print("   💾 本页处理完毕，正在提交变更...")
+            log("💾 このページの変更を保存しています...")
             logic.submit_changes(page)
 
         if page.locator("a[rel='next']").count() == 0:
-            print("   🏁 翻遍了全站所有页面。")
+            log("🏁 すべてのページを確認しました。")
             break
 
         page_num += 1
 
-    print("\n📊 运行结果统计：")
+    log("")
+    log("📊 処理結果：")
+
     for kw, c in keyword_counts.items():
         if c > 0:
-            print(f"  - [{kw}]: 处理了 {c} 条")
+            log(f"  - {kw}：{c} 件処理しました")
 
     if active_keywords:
-        print(f"  ⚠️ 以下 {len(active_keywords)} 个关键词未能达标（已找遍全站）：")
-        print(f"      {', '.join(active_keywords[:5])}" + ("..." if len(active_keywords) > 5 else ""))
+        log(f"⚠️ 以下 {len(active_keywords)} 件の商品は条件を満たす口コミが不足しています。")
+        log(f"   {', '.join(active_keywords[:5])}" + ("..." if len(active_keywords) > 5 else ""))
 
 
-def run_clear_all(page):
-    """模式2：一键取消所有当前勾选的置顶 (死磕第一页模式)"""
-    print("\n" + "!" * 50)
-    print(" 🔥 进入【全量清空模式】：将取消所有已勾选的置顶")
-    print("!" * 50)
+def run_clear_all(page, log):
+    """模式2：現在ピックアップ中の口コミをすべて解除する"""
+
+    log("")
+    log("!" * 50)
+    log("🔥 全件解除モードを開始します")
+    log("現在ピックアップ中の口コミをすべて解除します")
+    log("!" * 50)
 
     total_cleared = 0
     loop_count = 1
 
     while True:
-        print(f"  🔍 正在进行第 {loop_count} 轮清理 (始终扫描第 1 页)...")
+        log(f"🔍 第 {loop_count} 回目の確認を行っています...")
+
         try:
             page.goto("https://ptn.activityjapan.com/review?page=1", timeout=60000)
-        except:
-            print("   ⚠️ 页面加载较慢...")
+        except Exception:
+            log("⚠️ ページの読み込みに時間がかかっています。続行します。")
 
         rows = page.locator("tr.date-url-target")
         count = rows.count()
+
         if count == 0:
-            print("   🏁 页面无数据，清理结束。")
+            log("🏁 データが見つかりません。処理を終了します。")
             break
 
         page_needs_save = False
@@ -129,112 +158,290 @@ def run_clear_all(page):
 
         for i in range(count):
             row = rows.nth(i)
+
             try:
                 data = logic.parse_review_data(row)
-            except:
+            except Exception:
                 continue
 
-            if data['is_checked']:
-                print(f"      🗑️ 取消勾选 -> {data['title'][:20]}...")
-                logic.perform_uncheck_action(data['checkbox'])
+            if data["is_checked"]:
+                log(f"🗑️ ピックアップ解除 -> {data['title'][:20]}...")
+                logic.perform_uncheck_action(data["checkbox"])
                 page_needs_save = True
                 round_cleared += 1
                 total_cleared += 1
 
         if page_needs_save:
-            print(f"   💾 本轮发现了 {round_cleared} 个置顶，正在提交保存...")
+            log(f"💾 {round_cleared} 件を解除しました。変更を保存しています...")
             logic.submit_changes(page)
             loop_count += 1
             time.sleep(1)
         else:
-            print(f"\n✅ 清理任务圆满结束！总共取消了 {total_cleared} 个置顶。")
+            log("")
+            log(f"✅ 全件解除が完了しました。合計 {total_cleared} 件を解除しました。")
             break
 
 
-def run():
-    print("=================================")
-    print("   ActivityJapan 智能管理系统")
-    print("   (v28.0 - 最终完全体)")
-    print("=================================")
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("ActivityJapan 口コミ管理ツール")
+        self.root.geometry("760x560")
 
-    # 1. 账号选择
-    target_config = None
-    while True:
-        print("\n请选择要操作的账号：")
-        for key, info in config.ACCOUNT_MAP.items():
-            print(f"  [{key}] {info['name']}")
+        self.worker_thread = None
+        self.continue_event = threading.Event()
 
-        choice = input("\n请输入序号: ").strip()
-        if choice in config.ACCOUNT_MAP:
-            target_config = config.ACCOUNT_MAP[choice]
-            break
-        else:
-            print("❌ 输入错误")
+        self.account_var = tk.StringVar(value="1")
+        self.mode_var = tk.StringVar(value="1")
 
-    # 2. 模式选择
-    print("\n请选择运行模式：")
-    print("  [1] 自动管理模式 (根据清单限额5条置顶)")
-    print("  [2] 全量清空模式 (死磕第一页，清空所有置顶)")
-    mode = input("\n请输入模式序号: ").strip()
+        self.build_ui()
 
-    print(f"\n🚀 正在启动 [{target_config['name']}]...")
+    def build_ui(self):
+        main_frame = ttk.Frame(self.root, padding=12)
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=target_config["dir_path"],
-            headless=False,
-            channel="chrome",
-            ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--start-maximized"],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            no_viewport=True
+        title = ttk.Label(
+            main_frame,
+            text="ActivityJapan 口コミ管理ツール",
+            font=("Arial", 18, "bold")
         )
+        title.pack(anchor=tk.W, pady=(0, 12))
 
-        logic.inject_js_patches(context)
-        page = context.pages[0] if context.pages else context.new_page()
+        account_frame = ttk.LabelFrame(main_frame, text="操作するアカウント")
+        account_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # 3. 自动登录与轮询检测
-        print("👉 尝试访问后台管理页面...")
-        page.goto("https://ptn.activityjapan.com/review", timeout=60000)
-        time.sleep(2)
+        for key, info in config.ACCOUNT_MAP.items():
+            ttk.Radiobutton(
+                account_frame,
+                text=f"[{key}] {info['name']}",
+                variable=self.account_var,
+                value=key
+            ).pack(side=tk.LEFT, padx=12, pady=8)
 
-        if "/login" in page.url:
-            print("🔑 检测到登录页，尝试自动填充账号密码...")
-            try:
-                page.locator('input[name="id"]').fill(target_config["user"])
-                page.locator('input[name="pass"]').fill(target_config["pass"])
-                if page.locator('input[type="checkbox"]').count() > 0:
-                    page.locator('input[type="checkbox"]').first.check()
+        mode_frame = ttk.LabelFrame(main_frame, text="実行モード")
+        mode_frame.pack(fill=tk.X, pady=(0, 10))
 
-                print("点击登录按钮...")
-                page.locator('button:has-text("ログインする"), input[type="submit"]').first.click()
+        ttk.Radiobutton(
+            mode_frame,
+            text="自動管理モード（商品リストに基づき、各商品最大5件までピックアップ）",
+            variable=self.mode_var,
+            value="1"
+        ).pack(anchor=tk.W, padx=12, pady=5)
 
-                print("⏳ 正在轮询登录状态，请稍候（若有滑块/验证码请手动完成）...")
-                success = False
-                for _ in range(60):
-                    if "/review" in page.url:
-                        success = True
-                        break
-                    time.sleep(1)
+        ttk.Radiobutton(
+            mode_frame,
+            text="全件解除モード（現在ピックアップ中の口コミをすべて解除）",
+            variable=self.mode_var,
+            value="2"
+        ).pack(anchor=tk.W, padx=12, pady=5)
 
-                if not success:
-                    print("\n⚠️ 自动登录未在预时内完成。")
-                    input("✅ 请手动完成验证并登录到首页后，回到这里按【回车】继续...")
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.start_button = ttk.Button(
+            button_frame,
+            text="実行開始",
+            command=self.start
+        )
+        self.start_button.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.continue_button = ttk.Button(
+            button_frame,
+            text="手動ログイン完了後に続行",
+            command=self.continue_after_manual_login,
+            state=tk.DISABLED
+        )
+        self.continue_button.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.quit_button = ttk.Button(
+            button_frame,
+            text="終了",
+            command=self.root.quit
+        )
+        self.quit_button.pack(side=tk.RIGHT)
+
+        log_frame = ttk.LabelFrame(main_frame, text="実行ログ")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=20)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+
+        self.log("準備完了。")
+        self.log("Macで使用する場合は、事前にGoogle Chromeをインストールしてください。")
+
+    def log(self, message):
+        def _append():
+            self.log_text.insert(tk.END, str(message) + "\n")
+            self.log_text.see(tk.END)
+
+        self.root.after(0, _append)
+
+    def set_running_state(self, running: bool):
+        def _set():
+            self.start_button.config(state=tk.DISABLED if running else tk.NORMAL)
+
+        self.root.after(0, _set)
+
+    def enable_continue_button(self):
+        def _enable():
+            self.continue_button.config(state=tk.NORMAL)
+
+        self.root.after(0, _enable)
+
+    def disable_continue_button(self):
+        def _disable():
+            self.continue_button.config(state=tk.DISABLED)
+
+        self.root.after(0, _disable)
+
+    def continue_after_manual_login(self):
+        self.continue_event.set()
+        self.disable_continue_button()
+        self.log("✅ 手動ログイン完了として処理を続行します。")
+
+    def wait_for_manual_login(self, message):
+        self.continue_event.clear()
+        self.log(message)
+        self.log("ブラウザ上で手動ログインを完了してから、画面上の「手動ログイン完了後に続行」を押してください。")
+        self.enable_continue_button()
+        self.continue_event.wait()
+
+    def start(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showinfo("実行中", "現在処理中です。完了までお待ちください。")
+            return
+
+        account_key = self.account_var.get()
+        mode = self.mode_var.get()
+
+        target_config = config.ACCOUNT_MAP[account_key]
+
+        self.log("")
+        self.log("=" * 60)
+        self.log(f"🚀 {target_config['name']} の処理を開始します。")
+        self.log("=" * 60)
+
+        self.worker_thread = threading.Thread(
+            target=self.run_worker,
+            args=(target_config, mode),
+            daemon=True
+        )
+        self.worker_thread.start()
+
+    def run_worker(self, target_config, mode):
+        self.set_running_state(True)
+
+        context = None
+
+        try:
+            profile_dir = Path(config.COMMON_PROFILE_DIR)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            self.log(f"📁 Chrome profile フォルダ：{profile_dir}")
+
+            with sync_playwright() as p:
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=target_config["dir_path"],
+                        headless=False,
+                        channel="chrome",
+                        ignore_default_args=["--enable-automation"],
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--start-maximized"
+                        ],
+                        no_viewport=True
+                    )
+                except Exception as e:
+                    self.log("")
+                    self.log("❌ Google Chrome の起動に失敗しました。")
+                    self.log("この PC に Google Chrome がインストールされているか確認してください。")
+                    self.log(f"エラー内容：{e}")
+                    return
+
+                logic.inject_js_patches(context)
+
+                page = context.pages[0] if context.pages else context.new_page()
+
+                self.log("👉 管理画面にアクセスしています...")
+
+                try:
+                    page.goto("https://ptn.activityjapan.com/review", timeout=60000)
+                except Exception:
+                    self.log("⚠️ 初回ページ読み込みに時間がかかっています。続行します。")
+
+                time.sleep(2)
+
+                if "/login" in page.url:
+                    self.log("🔑 ログイン画面を検出しました。自動ログインを試行します。")
+
+                    try:
+                        page.locator('input[name="id"]').fill(target_config["user"])
+                        page.locator('input[name="pass"]').fill(target_config["pass"])
+
+                        if page.locator('input[type="checkbox"]').count() > 0:
+                            page.locator('input[type="checkbox"]').first.check()
+
+                        self.log("ログインボタンをクリックします...")
+
+                        page.locator(
+                            'button:has-text("ログインする"), input[type="submit"]'
+                        ).first.click()
+
+                        self.log("⏳ ログイン状態を確認しています。認証画面が表示された場合は手動で対応してください。")
+
+                        success = False
+
+                        for _ in range(60):
+                            if "/review" in page.url:
+                                success = True
+                                break
+
+                            time.sleep(1)
+
+                        if not success:
+                            self.wait_for_manual_login("⚠️ 自動ログインが時間内に完了しませんでした。")
+                        else:
+                            self.log("✅ ログインに成功しました。")
+
+                    except Exception as e:
+                        self.log(f"❌ 自動入力に失敗しました：{e}")
+                        self.wait_for_manual_login("手動ログインが必要です。")
+
+                if mode == "2":
+                    run_clear_all(page, self.log)
                 else:
-                    print("✅ 登录成功，自动跳转作业页！")
-            except Exception as e:
-                print(f"❌ 自动填充失败: {e}")
-                input("✅ 请手动输入账号密码并登录后，按【回车】继续...")
+                    run_auto_manage(page, target_config, self.log)
 
-        # 4. 执行对应模式
-        if mode == "2":
-            run_clear_all(page)
-        else:
-            run_auto_manage(page, target_config)
+                self.log("")
+                self.log("🎉 処理が完了しました。")
 
-        print("\n🎉 程序执行完毕")
-        context.close()
+        except Exception as e:
+            self.log("")
+            self.log("❌ 予期しないエラーが発生しました。")
+            self.log(f"エラー内容：{e}")
+
+        finally:
+            try:
+                if context:
+                    context.close()
+            except Exception:
+                pass
+
+            self.set_running_state(False)
+
+
+def main():
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    run()
+    main()
