@@ -6,8 +6,8 @@ import platform
 
 def resource_path(relative_path: str) -> Path:
     """
-    获取资源文件路径。
-    兼容普通 Python 运行和 PyInstaller 打包后的运行。
+    获取 PyInstaller 内部资源路径。
+    这里只作为备用路径使用。
     """
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / relative_path
@@ -17,7 +17,7 @@ def resource_path(relative_path: str) -> Path:
 
 def app_root_dir() -> Path:
     """
-    获取程序外部运行目录。
+    获取 APP 外部所在目录。
 
     普通运行：
         main.py 所在目录
@@ -27,9 +27,10 @@ def app_root_dir() -> Path:
 
     macOS app：
         xxx.app 所在目录的外层目录
-        例如：
+
+    例如：
         /Users/xxx/Downloads/AJ口コミ管理ツール.app
-        返回：
+    返回：
         /Users/xxx/Downloads
     """
     if getattr(sys, "frozen", False):
@@ -45,18 +46,43 @@ def app_root_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def keyword_file_path(filename: str) -> Path:
+    """
+    商品名称库 txt 的读取路径。
+
+    设计目标：
+    1. 用户可以直接修改 APP 旁边的 txt 文件
+    2. 不需要打开 APP 内部
+    3. txt 不需要打包进 APP
+
+    因此优先读取：
+        AJ口コミ管理ツール.app 同一层目录下的 txt
+
+    如果外部没有，再尝试读取内部资源路径作为备用。
+    """
+    external_file = app_root_dir() / filename
+
+    if external_file.exists():
+        return external_file
+
+    return resource_path(filename)
+
+
 # === 共用 Chrome Profile ===
 # 不再使用 D 盘路径。
 # 三个岛共用一个 profile。
-# 程序首次运行时会自动创建 chrome_profile 文件夹。
+# 程序首次运行时会自动在 APP 同级目录创建 chrome_profile 文件夹。
 BASE_DIR = app_root_dir()
 COMMON_PROFILE_DIR = BASE_DIR / "chrome_profile"
 
 
 # === 商品名称库文件 ===
-MIYAKO_KEYWORD_FILE = resource_path("宫古岛商品名称库.txt")
-IRIOMOTE_KEYWORD_FILE = resource_path("西表岛商品名称库.txt")
-ISHIGAKI_KEYWORD_FILE = resource_path("石垣岛商品名称库.txt")
+# 注意：
+# 这些 txt 不打包进 APP。
+# 使用者需要把 txt 放在 APP 同一层目录。
+MIYAKO_KEYWORD_FILE = keyword_file_path("宫古岛商品名称库.txt")
+IRIOMOTE_KEYWORD_FILE = keyword_file_path("西表岛商品名称库.txt")
+ISHIGAKI_KEYWORD_FILE = keyword_file_path("石垣岛商品名称库.txt")
 
 
 # === 账号信息 ===
