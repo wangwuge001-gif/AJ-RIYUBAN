@@ -1,40 +1,112 @@
-name: Build macOS App
+name: Build macOS Apple Silicon App
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ja-jp
+    paths:
+      - "*.py"
+      - ".github/workflows/build-mac.yml"
 
 jobs:
   build-mac:
-    runs-on: macos-latest
+    # GitHub's macos-15 standard runner is Apple Silicon (M1/arm64).
+    runs-on: macos-15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      - name: Verify Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "macOS: $(sw_vers -productVersion)"
+          echo "CPU: $(uname -m)"
+          test "$(uname -m)" = "arm64"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          architecture: "arm64"
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pyinstaller
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python -m pip install "pyinstaller==6.14.1" "playwright==1.59.0"
+          python -c "import tkinter; import playwright; print('Python dependencies OK')"
 
-      - name: Build macOS app
+      - name: Build ARM64 macOS app
+        shell: bash
         run: |
-          pyinstaller --windowed --name "AJ口コミ管理ツール" \
+          set -euo pipefail
+          python -m PyInstaller \
+            --noconfirm \
+            --clean \
+            --windowed \
+            --name "AJ口コミ管理ツール" \
+            --target-architecture arm64 \
+            --osx-bundle-identifier "com.activityjapan.review-manager" \
             --collect-all playwright \
             main.py
 
-      - name: Zip app
+      - name: Validate app bundle
+        shell: bash
         run: |
-          cd dist
-          zip -r AJ口コミ管理ツール-mac.zip AJ口コミ管理ツール.app
+          set -euo pipefail
+
+          APP="dist/AJ口コミ管理ツール.app"
+          EXECUTABLE="$APP/Contents/MacOS/AJ口コミ管理ツール"
+
+          test -d "$APP"
+          test -x "$EXECUTABLE"
+          plutil -lint "$APP/Contents/Info.plist"
+
+          ARCHS="$(lipo -archs "$EXECUTABLE")"
+          echo "Executable architectures: $ARCHS"
+          test "$ARCHS" = "arm64"
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          "$EXECUTABLE" > startup.log 2>&1 &
+          APP_PID=$!
+          sleep 8
+
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "App exited during startup:"
+            cat startup.log
+            wait "$APP_PID"
+            exit 1
+          fi
+
+          echo "App stayed alive for 8 seconds; startup smoke test passed."
+          kill "$APP_PID"
+          wait "$APP_PID" || true
+
+      - name: Package with macOS metadata preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+          cp startup.log release/
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/AJ口コミ管理ツール.app" \
+            "release/AJ口コミ管理ツール-macOS-M1.zip"
+
+          unzip -l "release/AJ口コミ管理ツール-macOS-M1.zip" | sed -n '1,30p'
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: AJ口コミ管理ツール-mac
-          path: dist/AJ口コミ管理ツール-mac.zip
+          name: AJ口コミ管理ツール-macOS-M1
+          if-no-files-found: error
+          path: |
+            release/AJ口コミ管理ツール-macOS-M1.zip
+            startup.log
